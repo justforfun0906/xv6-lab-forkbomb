@@ -3,6 +3,7 @@
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
+#include "kernel/param.h"
 
 // Parsed command representation
 #define EXEC  1
@@ -49,6 +50,12 @@ struct backcmd {
   struct cmd *cmd;
 };
 
+static int jobs[NPROC];
+void add_job(int pid);
+int remove_job(int pid);
+void print_jobs(void);
+int is_jobs_command(char *s);
+
 int fork1(void);  // Fork but panics on failure.
 void panic(char*);
 struct cmd *parsecmd(char*);
@@ -59,7 +66,7 @@ void
 runcmd(struct cmd *cmd)
 {
   int p[2];
-  struct backcmd *bcmd;
+  //struct backcmd *bcmd;
   struct execcmd *ecmd;
   struct listcmd *lcmd;
   struct pipecmd *pcmd;
@@ -121,12 +128,6 @@ runcmd(struct cmd *cmd)
     wait(0);
     wait(0);
     break;
-
-  case BACK:
-    bcmd = (struct backcmd*)cmd;
-    if(fork1() == 0)
-      runcmd(bcmd->cmd);
-    break;
   }
   exit(0);
 }
@@ -134,11 +135,72 @@ runcmd(struct cmd *cmd)
 int
 getcmd(char *buf, int nbuf)
 {
-  write(2, "$ ", 2);
+  //write(2, "$ ", 2);
   memset(buf, 0, nbuf);
+  //blocking the main loop until user input
   gets(buf, nbuf);
   if(buf[0] == 0) // EOF
     return -1;
+  return 0;
+}
+void
+poll_bg()
+{
+  int status;
+  int pid;
+  //get the exit status of all zombie background processes if any
+  //pid = the pid of the zombie process
+  //wait_noblock will free the zombie process
+  while ((pid = wait_noblock(&status)) > 0) {
+    if(remove_job(pid))
+      printf("[bg %d] exited with status %d\n", pid, status);
+  }
+}
+
+void
+add_job(int pid)
+{
+  for(int i = 0; i < NPROC; i++){
+    if(jobs[i] == 0){
+      jobs[i] = pid;
+      return;
+    }
+  }
+}
+
+int
+remove_job(int pid)
+{
+  for(int i = 0; i < NPROC; i++){
+    if(jobs[i] == pid){
+      jobs[i] = 0;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+void
+print_jobs(void)
+{
+  for(int i = 0; i < NPROC; i++){
+    if(jobs[i] != 0)
+      printf("%d\n", jobs[i]);
+  }
+}
+
+int
+is_jobs_command(char *s)
+{
+  if(s == 0)
+    return 0;
+  if(s[0] != 'j' || s[1] != 'o' || s[2] != 'b' || s[3] != 's')
+    return 0;
+  char *rest = s + 4;
+  while(*rest == ' ' || *rest == '\t')
+    rest++;
+  if(*rest == 0 || *rest == '\n' || *rest == '\r')
+    return 1;
   return 0;
 }
 
@@ -157,7 +219,11 @@ main(void)
   }
 
   // Read and run input commands.
-  while(getcmd(buf, sizeof(buf)) >= 0){
+  while(1){
+    poll_bg();
+    write(2, "$ ", 2);
+    if(getcmd(buf, sizeof(buf)) < 0)
+      break;
     if(buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' '){
       // Chdir must be called by the parent, not the child.
       buf[strlen(buf)-1] = 0;  // chop \n
@@ -165,9 +231,54 @@ main(void)
         fprintf(2, "cannot cd %s\n", buf+3);
       continue;
     }
-    if(fork1() == 0)
-      runcmd(parsecmd(buf));
-    wait(0);
+    char *trim = buf;
+    while(*trim == ' ' || *trim == '\t')
+      trim++;
+    if(is_jobs_command(trim)){
+      poll_bg();
+      print_jobs();
+      continue;
+    }
+    struct cmd *cmd = parsecmd(buf);
+    if(cmd->type == BACK){
+      struct backcmd *bcmd = (struct backcmd*)cmd;
+      int pid = fork1();
+      if(pid == 0){
+        runcmd(bcmd->cmd);
+        poll_bg();
+        exit(0);
+      } else {
+        add_job(pid);
+        poll_bg();
+        printf("[%d]\n", pid);
+      }
+    } else {
+      poll_bg();
+      int fg_pid = fork1();
+      if(fg_pid == 0){
+        runcmd(cmd);
+      }else{
+        // Wait for the foreground process while periodically checking for background zombies
+        int status;
+        while(1){
+          int result = wait_noblock(&status);
+          if(result == fg_pid){
+            // Foreground process finished
+            break;
+          } else if(result > 0){
+            // A background process finished
+            if(remove_job(result))
+              printf("[bg %d] exited with status %d\n", result, status);
+            // Continue checking for more processes
+          } else {
+            // No process finished yet, sleep briefly
+            sleep(1);
+          }
+        }
+        // Clean up any remaining zombie processes
+        poll_bg();
+      }
+    }
   }
   exit(0);
 }
