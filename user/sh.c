@@ -55,6 +55,7 @@ void add_job(int pid);
 int remove_job(int pid);
 void print_jobs(void);
 int is_jobs_command(char *s);
+int readline(int fd, char *buf, int nbuf);
 
 int fork1(void);  // Fork but panics on failure.
 void panic(char*);
@@ -205,10 +206,32 @@ is_jobs_command(char *s)
 }
 
 int
-main(void)
+readline(int fd, char *buf, int nbuf)
+{
+  int i = 0;
+  while(i + 1 < nbuf){
+    char c;
+    int n = read(fd, &c, 1);
+    if(n < 1){
+      if(i == 0)
+        return -1;
+      break;
+    }
+    buf[i++] = c;
+    if(c == '\n' || c == '\r')
+      break;
+  }
+  buf[i] = 0;
+  return 0;
+}
+
+int
+main(int argc, char *argv[])
 {
   static char buf[100];
   int fd;
+  int script_mode = 0;
+  int script_fd = -1;
 
   // Ensure that three file descriptors are open.
   while((fd = open("console", O_RDWR)) >= 0){
@@ -218,12 +241,28 @@ main(void)
     }
   }
 
+  if(argc > 1){
+    script_mode = 1;
+    script_fd = open(argv[1], O_RDONLY);
+    if(script_fd < 0){
+      fprintf(2, "sh: cannot open %s\n", argv[1]);
+      exit(1);
+    }
+  }
+
   // Read and run input commands.
   while(1){
     poll_bg();
-    write(2, "$ ", 2);
-    if(getcmd(buf, sizeof(buf)) < 0)
-      break;
+    if(script_mode){
+      if(readline(script_fd, buf, sizeof(buf)) < 0)
+        break;
+      if(buf[0] == 0)
+        continue;
+    } else {
+      write(2, "$ ", 2);
+      if(getcmd(buf, sizeof(buf)) < 0)
+        break;
+    }
     if(buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' '){
       // Chdir must be called by the parent, not the child.
       buf[strlen(buf)-1] = 0;  // chop \n
