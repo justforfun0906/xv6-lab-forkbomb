@@ -288,8 +288,10 @@ main(int argc, char *argv[])
         exit(0);
       } else {
         add_job(pid);
-        poll_bg();
         printf("[%d]\n", pid);
+        // Give background process a moment to fail if it's going to
+        sleep(1);
+        poll_bg();
       }
     } else {
       poll_bg();
